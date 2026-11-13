@@ -48,6 +48,24 @@
         android:text="Material: --"
         android:textSize="18sp"
         android:textColor="#00E676"
+        android:layout_marginTop="8dp" />
+
+    <TextView
+        android:id="@+id/tvConfidence"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Confidence: --%"
+        android:textSize="16sp"
+        android:textColor="#FFCA28"
+        android:layout_marginTop="8dp" />
+
+    <TextView
+        android:id="@+id/tvMicLevel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Mic Input Peak: --"
+        android:textSize="14sp"
+        android:textColor="#888888"
         android:layout_marginTop="8dp"
         android:layout_marginBottom="40dp" />
 

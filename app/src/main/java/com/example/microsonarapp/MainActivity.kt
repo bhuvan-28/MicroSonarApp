@@ -18,6 +18,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvDimensions: TextView
     private lateinit var tvVolume: TextView
     private lateinit var tvMaterial: TextView
+    private lateinit var tvConfidence: TextView
+    private lateinit var tvMicLevel: TextView
     private lateinit var btnPing: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,6 +29,8 @@ class MainActivity : AppCompatActivity() {
         tvDimensions = findViewById(R.id.tvDimensions)
         tvVolume = findViewById(R.id.tvVolume)
         tvMaterial = findViewById(R.id.tvMaterial)
+        tvConfidence = findViewById(R.id.tvConfidence)
+        tvMicLevel = findViewById(R.id.tvMicLevel)
         btnPing = findViewById(R.id.btnPing)
 
         // Request Audio Recording Permission
@@ -46,6 +50,8 @@ class MainActivity : AppCompatActivity() {
                     tvDimensions.text = String.format("%.2fm × %.2fm × %.2fm", metrics.width, metrics.length, metrics.height)
                     tvVolume.text = String.format("Room Volume: %.1f m³", metrics.volume)
                     tvMaterial.text = "Material: ${metrics.material}"
+                    tvConfidence.text = String.format("Confidence: %.1f%%", metrics.confidence * 100f)
+                    tvMicLevel.text = String.format("Mic Peak Signal: %.3f", metrics.maxMicLevel)
                 } catch (e: Exception) {
                     Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                 } finally {

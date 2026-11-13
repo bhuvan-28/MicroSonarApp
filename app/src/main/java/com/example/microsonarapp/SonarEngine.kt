@@ -11,6 +11,8 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 import java.nio.FloatBuffer
 import kotlin.math.*
 
@@ -20,7 +22,8 @@ data class RoomMetrics(
     val height: Float,
     val volume: Float,
     val material: String,
-    val confidence: Float
+    val confidence: Float,
+    val maxMicLevel: Float
 )
 
 class SonarEngine(private val context: Context) {
@@ -79,27 +82,48 @@ class SonarEngine(private val context: Context) {
 
         track.write(chirp, 0, chirp.size, AudioTrack.WRITE_BLOCKING)
 
-        val minBuf = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT)
+        val minBuf = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        if (minBuf <= 0) {
+            throw IllegalStateException("AudioRecord configuration not supported on this device")
+        }
+
         val recorder = AudioRecord(
             MediaRecorder.AudioSource.MIC,
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_FLOAT,
-            max(minBuf, totalRecordSamples * 4)
+            AudioFormat.ENCODING_PCM_16BIT,
+            max(minBuf, totalRecordSamples * 2)
         )
+
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            throw IllegalStateException("Microphone hardware failed to initialize")
+        }
+
+        val shortBuffer = ShortArray(totalRecordSamples)
 
         recorder.startRecording()
         track.play()
 
         var readTotal = 0
         while (readTotal < totalRecordSamples) {
-            val read = recorder.read(recordedBuffer, readTotal, totalRecordSamples - readTotal, AudioRecord.READ_BLOCKING)
-            if (read > 0) readTotal += read else break
+            val read = recorder.read(shortBuffer, readTotal, totalRecordSamples - readTotal, AudioRecord.READ_BLOCKING)
+            if (read > 0) {
+                readTotal += read
+            } else {
+                throw IllegalStateException("AudioRecord read failed with code: $read")
+            }
+        }
+
+        for (i in 0 until totalRecordSamples) {
+            recordedBuffer[i] = shortBuffer[i] / 32768.0f
         }
 
         try { recorder.stop() } catch (_: Exception) {}
         recorder.release()
         track.release()
+
+        // Save raw recording to cache directory so we can inspect it later
+        saveWav("raw_recording.wav", recordedBuffer, sampleRate)
 
         // 1. Matched filter cross-correlation
         val rir = matchedFilter(recordedBuffer, chirp)
@@ -128,20 +152,23 @@ class SonarEngine(private val context: Context) {
         for (v in logits) sumExp += exp(v.toDouble())
         val confidence = (exp(maxLogit.toDouble()) / sumExp).toFloat()
 
+        val maxMicLevel = recordedBuffer.maxOf { abs(it) }
+
         RoomMetrics(
             width = dims[0],
             length = dims[1],
             height = dims[2],
             volume = dims[0] * dims[1] * dims[2],
             material = materials[bestIdx],
-            confidence = confidence
+            confidence = confidence,
+            maxMicLevel = maxMicLevel
         )
     }
 
     private fun matchedFilter(echo: FloatArray, ref: FloatArray): FloatArray {
         val out = FloatArray(echo.size)
         val step = 1
-        val maxRefLen = min(ref.size, 2400)
+        val maxRefLen = ref.size // Fix: Use the full chirp length for correlation instead of truncating to 2400
         var maxVal = 1e-9f
 
         for (i in 0 until echo.size - maxRefLen step step) {
@@ -227,6 +254,41 @@ class SonarEngine(private val context: Context) {
             }
         }
         return outTensor
+    }
+
+    private fun saveWav(filename: String, data: FloatArray, sampleRate: Int) {
+        val file = File(context.cacheDir, filename)
+        val out = FileOutputStream(file)
+        
+        val pcm = ByteArray(data.size * 2)
+        var idx = 0
+        for (f in data) {
+            val s = (f.coerceIn(-1f, 1f) * 32767).toInt().toShort()
+            pcm[idx++] = (s.toInt() and 0xFF).toByte()
+            pcm[idx++] = ((s.toInt() shr 8) and 0xFF).toByte()
+        }
+        
+        val totalDataLen = pcm.size + 36
+        val byteRate = sampleRate * 2
+        
+        val header = ByteArray(44)
+        header[0] = 'R'.code.toByte(); header[1] = 'I'.code.toByte(); header[2] = 'F'.code.toByte(); header[3] = 'F'.code.toByte()
+        header[4] = (totalDataLen and 0xff).toByte(); header[5] = ((totalDataLen shr 8) and 0xff).toByte(); header[6] = ((totalDataLen shr 16) and 0xff).toByte(); header[7] = ((totalDataLen shr 24) and 0xff).toByte()
+        header[8] = 'W'.code.toByte(); header[9] = 'A'.code.toByte(); header[10] = 'V'.code.toByte(); header[11] = 'E'.code.toByte()
+        header[12] = 'f'.code.toByte(); header[13] = 'm'.code.toByte(); header[14] = 't'.code.toByte(); header[15] = ' '.code.toByte()
+        header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0
+        header[20] = 1; header[21] = 0
+        header[22] = 1; header[23] = 0 // 1 channel
+        header[24] = (sampleRate and 0xff).toByte(); header[25] = ((sampleRate shr 8) and 0xff).toByte(); header[26] = ((sampleRate shr 16) and 0xff).toByte(); header[27] = ((sampleRate shr 24) and 0xff).toByte()
+        header[28] = (byteRate and 0xff).toByte(); header[29] = ((byteRate shr 8) and 0xff).toByte(); header[30] = ((byteRate shr 16) and 0xff).toByte(); header[31] = ((byteRate shr 24) and 0xff).toByte()
+        header[32] = 2; header[33] = 0 // block align
+        header[34] = 16; header[35] = 0 // bits per sample
+        header[36] = 'd'.code.toByte(); header[37] = 'a'.code.toByte(); header[38] = 't'.code.toByte(); header[39] = 'a'.code.toByte()
+        header[40] = (pcm.size and 0xff).toByte(); header[41] = ((pcm.size shr 8) and 0xff).toByte(); header[42] = ((pcm.size shr 16) and 0xff).toByte(); header[43] = ((pcm.size shr 24) and 0xff).toByte()
+        
+        out.write(header)
+        out.write(pcm)
+        out.close()
     }
 }
 
