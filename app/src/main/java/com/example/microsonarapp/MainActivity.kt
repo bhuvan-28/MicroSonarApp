@@ -30,6 +30,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvConfidence: TextView
     private lateinit var tvMicLevel: TextView
     private lateinit var btnPing: Button
+    private lateinit var btnDiagnostic: Button
     private lateinit var waveformChart: LineChart
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,6 +45,7 @@ class MainActivity : AppCompatActivity() {
         tvConfidence = findViewById(R.id.tvConfidence)
         tvMicLevel = findViewById(R.id.tvMicLevel)
         btnPing = findViewById(R.id.btnPing)
+        btnDiagnostic = findViewById(R.id.btnDiagnostic)
         waveformChart = findViewById(R.id.waveformChart)
         
         setupChart()
@@ -55,8 +57,41 @@ class MainActivity : AppCompatActivity() {
 
         sonarEngine = SonarEngine(this)
 
+        btnDiagnostic.setOnClickListener {
+            btnDiagnostic.isEnabled = false
+            btnPing.isEnabled = false
+            btnDiagnostic.text = "DIAGNOSTIC RUNNING..."
+
+            lifecycleScope.launch {
+                try {
+                    val metrics = sonarEngine.runSweep(isDiagnostic = true)
+                    
+                    // Display raw metrics
+                    tvDimensions.text = String.format("%.2fm × %.2fm × %.2fm", metrics.width, metrics.length, metrics.height)
+                    tvVolume.text = String.format("Room Volume: %.1f m³", metrics.volume)
+                    tvMaterial.text = "Material: ${metrics.material}"
+                    tvRT60.text = String.format("Reverb Time (RT60): %.2f s", metrics.rt60)
+                    tvRoomType.text = metrics.roomType
+                    tvConfidence.text = String.format("Confidence: %.1f%%", metrics.confidence * 100f)
+                    tvMicLevel.text = String.format("Mic Peak Signal: %.3f", metrics.maxMicLevel)
+                    
+                    // Render waveform visualizer
+                    renderWaveform(metrics.impulseResponse)
+                    
+                    Toast.makeText(this@MainActivity, "Diagnostic scan complete. Check Cache directory.", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                } finally {
+                    btnDiagnostic.isEnabled = true
+                    btnPing.isEnabled = true
+                    btnDiagnostic.text = "RUN DIAGNOSTIC SCAN"
+                }
+            }
+        }
+
         btnPing.setOnClickListener {
             btnPing.isEnabled = false
+            btnDiagnostic.isEnabled = false
             btnPing.text = "LISTENING..."
 
             lifecycleScope.launch {
@@ -87,6 +122,7 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                 } finally {
                     btnPing.isEnabled = true
+                    btnDiagnostic.isEnabled = true
                     btnPing.text = "PULSE SONAR"
                 }
             }

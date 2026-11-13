@@ -9,11 +9,18 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.FloatBuffer
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.*
 
 data class RoomMetrics(
@@ -64,9 +71,10 @@ class SonarEngine(private val context: Context) {
         return chirp
     }
 
-    suspend fun runSweep(): RoomMetrics = withContext(Dispatchers.Default) {
+    suspend fun runSweep(isDiagnostic: Boolean = false): RoomMetrics = withContext(Dispatchers.Default) {
+        val durationSec = if (isDiagnostic) 1.5f else 0.6f
         val chirp = generateLogChirp()
-        val totalRecordSamples = (0.6 * sampleRate).toInt()
+        val totalRecordSamples = (durationSec * sampleRate).toInt()
         val recordedBuffer = FloatArray(totalRecordSamples)
 
         val track = AudioTrack.Builder()
@@ -102,6 +110,17 @@ class SonarEngine(private val context: Context) {
             throw IllegalStateException("Microphone hardware failed to initialize")
         }
 
+        val sessionId = recorder.audioSessionId
+        val aecAvailable = AcousticEchoCanceler.isAvailable()
+        val agcAvailable = AutomaticGainControl.isAvailable()
+        val nsAvailable = NoiseSuppressor.isAvailable()
+        var aecEnabled = false
+        var agcEnabled = false
+        var nsEnabled = false
+        try { if (aecAvailable) AcousticEchoCanceler.create(sessionId)?.let { aecEnabled = it.enabled; it.release() } } catch (e: Exception) {}
+        try { if (agcAvailable) AutomaticGainControl.create(sessionId)?.let { agcEnabled = it.enabled; it.release() } } catch (e: Exception) {}
+        try { if (nsAvailable) NoiseSuppressor.create(sessionId)?.let { nsEnabled = it.enabled; it.release() } } catch (e: Exception) {}
+
         val shortBuffer = ShortArray(totalRecordSamples)
 
         recorder.startRecording()
@@ -117,19 +136,89 @@ class SonarEngine(private val context: Context) {
             }
         }
 
+        var sumSquares = 0.0
+        var clipCount = 0
+        var maxAmp = 0f
         for (i in 0 until totalRecordSamples) {
-            recordedBuffer[i] = shortBuffer[i] / 32768.0f
+            val sample = shortBuffer[i] / 32768.0f
+            recordedBuffer[i] = sample
+            
+            val absVal = abs(sample)
+            if (absVal > maxAmp) maxAmp = absVal
+            if (absVal >= 0.999f) clipCount++
+            sumSquares += sample * sample
         }
+        val rms = sqrt(sumSquares / totalRecordSamples).toFloat()
+        val clipPercentage = (clipCount.toFloat() / totalRecordSamples) * 100f
 
         try { recorder.stop() } catch (_: Exception) {}
         recorder.release()
         track.release()
 
-        // Save raw recording to cache directory so we can inspect it later
-        saveWav("raw_recording.wav", recordedBuffer, sampleRate)
+        if (!isDiagnostic) {
+            // Save raw recording to cache directory so we can inspect it later
+            saveWav("raw_recording.wav", recordedBuffer, sampleRate)
+        }
 
         // 1. Matched filter cross-correlation
         val rir = matchedFilter(recordedBuffer, chirp)
+
+        if (isDiagnostic) {
+            var corrMaxVal = 0f
+            var corrMaxIdx = 0
+            for (i in rir.indices) {
+                val absVal = abs(rir[i])
+                if (absVal > corrMaxVal) {
+                    corrMaxVal = absVal
+                    corrMaxIdx = i
+                }
+            }
+            val corrPeakTimeMs = (corrMaxIdx.toFloat() / sampleRate) * 1000f
+            val postPeakSamples = rir.size - corrMaxIdx
+            val postPeakTimeMs = (postPeakSamples.toFloat() / sampleRate) * 1000f
+
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            saveWav("diag_${ts}_mic.wav", recordedBuffer, sampleRate)
+            saveWav("diag_${ts}_chirp.wav", chirp, sampleRate)
+            
+            File(context.cacheDir, "diag_${ts}_correlation.csv").printWriter().use { out ->
+                out.println("time_sec,amplitude")
+                for (i in rir.indices) {
+                    out.println("${(i.toFloat()/sampleRate)},${rir[i]}")
+                }
+            }
+            
+            val json = JSONObject()
+            json.put("scan_id", ts)
+            json.put("sample_rate", sampleRate)
+            json.put("recording_duration_sec", durationSec)
+            json.put("chirp_duration_sec", chirpDuration)
+            
+            val micObj = JSONObject()
+            micObj.put("peak_amplitude", maxAmp)
+            micObj.put("rms_amplitude", rms)
+            micObj.put("clipping_percentage", clipPercentage)
+            json.put("mic_metrics", micObj)
+            
+            val corrObj = JSONObject()
+            corrObj.put("peak_index", corrMaxIdx)
+            corrObj.put("peak_time_ms", corrPeakTimeMs)
+            corrObj.put("peak_amplitude", corrMaxVal)
+            corrObj.put("available_tail_samples", postPeakSamples)
+            corrObj.put("available_tail_ms", postPeakTimeMs)
+            json.put("correlation_metrics", corrObj)
+            
+            val fxObj = JSONObject()
+            fxObj.put("aec_available", aecAvailable)
+            fxObj.put("aec_enabled", aecEnabled)
+            fxObj.put("agc_available", agcAvailable)
+            fxObj.put("agc_enabled", agcEnabled)
+            fxObj.put("ns_available", nsAvailable)
+            fxObj.put("ns_enabled", nsEnabled)
+            json.put("audio_effects", fxObj)
+            
+            File(context.cacheDir, "diag_${ts}_meta.json").writeText(json.toString(2))
+        }
 
         // Calculate Physics-based Reverberation Time (RT60)
         val rt60 = computeRT60(rir)
