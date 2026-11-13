@@ -23,7 +23,10 @@ data class RoomMetrics(
     val volume: Float,
     val material: String,
     val confidence: Float,
-    val maxMicLevel: Float
+    val maxMicLevel: Float,
+    val rt60: Float,
+    val roomType: String,
+    val impulseResponse: FloatArray // Added for visualization
 )
 
 class SonarEngine(private val context: Context) {
@@ -128,6 +131,15 @@ class SonarEngine(private val context: Context) {
         // 1. Matched filter cross-correlation
         val rir = matchedFilter(recordedBuffer, chirp)
 
+        // Calculate Physics-based Reverberation Time (RT60)
+        val rt60 = computeRT60(rir)
+        val roomType = when {
+            rt60 < 0.35f -> "Small Damped Room (Office / Closet)"
+            rt60 in 0.35f..0.75f -> "Medium Standard Room (Bedroom)"
+            rt60 in 0.75f..1.2f -> "Large Echoey Space (Hallway / Tile)"
+            else -> "Vast Acoustic Environment (Hall / Cave)"
+        }
+
         // 2. Compute proper Mel-Spectrogram (128x128) matching Python training
         val melSpec = computeMelSpectrogram(rir)
 
@@ -161,7 +173,10 @@ class SonarEngine(private val context: Context) {
             volume = dims[0] * dims[1] * dims[2],
             material = materials[bestIdx],
             confidence = confidence,
-            maxMicLevel = maxMicLevel
+            maxMicLevel = maxMicLevel,
+            rt60 = rt60,
+            roomType = roomType,
+            impulseResponse = rir // Export the IR for graphing
         )
     }
 
@@ -289,6 +304,66 @@ class SonarEngine(private val context: Context) {
         out.write(header)
         out.write(pcm)
         out.close()
+    }
+
+    private fun computeRT60(rir: FloatArray): Float {
+        var maxIdx = 0
+        var maxVal = 0f
+        for (i in rir.indices) {
+            val absVal = abs(rir[i])
+            if (absVal > maxVal) {
+                maxVal = absVal
+                maxIdx = i
+            }
+        }
+        if (maxVal < 1e-6f) return 0.0f
+
+        val tailLen = rir.size - maxIdx
+        if (tailLen < 100) return 0.0f
+
+        val energy = DoubleArray(tailLen)
+        var cumulative = 0.0
+        for (i in tailLen - 1 downTo 0) {
+            val sample = rir[maxIdx + i].toDouble()
+            cumulative += sample * sample
+            energy[i] = cumulative
+        }
+
+        val maxEnergy = energy[0]
+        if (maxEnergy <= 1e-12) return 0.0f
+
+        val dbEnergy = FloatArray(tailLen)
+        for (i in 0 until tailLen) {
+            val norm = energy[i] / maxEnergy
+            dbEnergy[i] = (10.0 * log10(max(norm, 1e-10))).toFloat()
+        }
+
+        var idx5 = -1
+        var idx25 = -1
+        for (i in 0 until tailLen) {
+            if (idx5 == -1 && dbEnergy[i] <= -5.0f) {
+                idx5 = i
+            }
+            if (idx25 == -1 && dbEnergy[i] <= -25.0f) {
+                idx25 = i
+            }
+        }
+
+        if (idx5 != -1 && idx25 != -1 && idx25 > idx5) {
+            val samplesFor20dB = (idx25 - idx5).toFloat()
+            val timeFor20dB = samplesFor20dB / sampleRate
+            return (timeFor20dB * 3.0f).coerceIn(0.05f, 3.5f)
+        }
+
+        var idxNoise = tailLen - 1
+        for (i in 0 until tailLen) {
+            if (dbEnergy[i] <= -15.0f) {
+                idxNoise = i
+                break
+            }
+        }
+        val fallbackSec = (idxNoise.toFloat() / sampleRate) * (60.0f / 15.0f)
+        return fallbackSec.coerceIn(0.1f, 3.0f)
     }
 }
 

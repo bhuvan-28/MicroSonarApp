@@ -4,14 +4,12 @@ plugins {
 
 android {
     namespace = "com.example.microsonarapp"
-    compileSdk {
-        version = release(37)
-    }
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.example.microsonarapp"
         minSdk = 28
-        targetSdk = 37
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
@@ -53,4 +51,7 @@ dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
     // Google Oboe for ultra low-latency audio capture and chirp emission
     implementation("com.google.oboe:oboe:1.9.0")
+    
+    // MPAndroidChart for Waveform Visualization
+    implementation("com.github.PhilJay:MPAndroidChart:v3.1.0")
 }

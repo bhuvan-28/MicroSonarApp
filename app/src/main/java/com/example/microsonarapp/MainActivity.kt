@@ -10,6 +10,13 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import android.graphics.Color
+import com.github.mikephil.charting.charts.LineChart
+import com.github.mikephil.charting.components.XAxis
+import com.github.mikephil.charting.data.Entry
+import com.github.mikephil.charting.data.LineData
+import com.github.mikephil.charting.data.LineDataSet
+import com.example.microsonarapp.api.GameAcousticApi
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
@@ -18,9 +25,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvDimensions: TextView
     private lateinit var tvVolume: TextView
     private lateinit var tvMaterial: TextView
+    private lateinit var tvRT60: TextView
+    private lateinit var tvRoomType: TextView
     private lateinit var tvConfidence: TextView
     private lateinit var tvMicLevel: TextView
     private lateinit var btnPing: Button
+    private lateinit var waveformChart: LineChart
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,9 +39,14 @@ class MainActivity : AppCompatActivity() {
         tvDimensions = findViewById(R.id.tvDimensions)
         tvVolume = findViewById(R.id.tvVolume)
         tvMaterial = findViewById(R.id.tvMaterial)
+        tvRT60 = findViewById(R.id.tvRT60)
+        tvRoomType = findViewById(R.id.tvRoomType)
         tvConfidence = findViewById(R.id.tvConfidence)
         tvMicLevel = findViewById(R.id.tvMicLevel)
         btnPing = findViewById(R.id.btnPing)
+        waveformChart = findViewById(R.id.waveformChart)
+        
+        setupChart()
 
         // Request Audio Recording Permission
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -47,11 +62,27 @@ class MainActivity : AppCompatActivity() {
             lifecycleScope.launch {
                 try {
                     val metrics = sonarEngine.runSweep()
+                    
+                    // Display raw metrics
                     tvDimensions.text = String.format("%.2fm × %.2fm × %.2fm", metrics.width, metrics.length, metrics.height)
                     tvVolume.text = String.format("Room Volume: %.1f m³", metrics.volume)
                     tvMaterial.text = "Material: ${metrics.material}"
+                    tvRT60.text = String.format("Reverb Time (RT60): %.2f s", metrics.rt60)
+                    tvRoomType.text = metrics.roomType
                     tvConfidence.text = String.format("Confidence: %.1f%%", metrics.confidence * 100f)
                     tvMicLevel.text = String.format("Mic Peak Signal: %.3f", metrics.maxMicLevel)
+                    
+                    // Translate for Game Engine
+                    val gameProfile = GameAcousticApi.translateMetricsToGameProfile(metrics)
+                    
+                    // Render waveform visualizer
+                    renderWaveform(metrics.impulseResponse)
+                    
+                    if (gameProfile.isReliable) {
+                        Toast.makeText(this@MainActivity, "Game API: Triggering Map Scale x${gameProfile.suggestedMapScale}", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@MainActivity, "Game API: Unreliable scan. Mic signal too low.", Toast.LENGTH_LONG).show()
+                    }
                 } catch (e: Exception) {
                     Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                 } finally {
@@ -60,5 +91,54 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun setupChart() {
+        waveformChart.apply {
+            description.isEnabled = false
+            legend.isEnabled = false
+            setTouchEnabled(true)
+            isDragEnabled = true
+            setScaleEnabled(true)
+            setPinchZoom(true)
+            
+            // Set dark theme styling
+            xAxis.apply {
+                position = XAxis.XAxisPosition.BOTTOM
+                setDrawGridLines(false)
+                textColor = Color.LTGRAY
+            }
+            
+            axisLeft.apply {
+                setDrawGridLines(false)
+                textColor = Color.LTGRAY
+                axisMaximum = 1.0f
+                axisMinimum = -1.0f
+            }
+            axisRight.isEnabled = false
+        }
+    }
+
+    private fun renderWaveform(ir: FloatArray) {
+        // Downsample the impulse response to 1000 points to prevent chart lag
+        val targetPoints = 1000
+        val step = (ir.size / targetPoints).coerceAtLeast(1)
+        
+        val entries = ArrayList<Entry>()
+        for (i in ir.indices step step) {
+            val timeMillis = (i.toFloat() / 48000f) * 1000f
+            entries.add(Entry(timeMillis, ir[i]))
+        }
+
+        val dataSet = LineDataSet(entries, "Impulse Response").apply {
+            color = Color.parseColor("#00E5FF")
+            lineWidth = 1.5f
+            setDrawCircles(false)
+            setDrawValues(false)
+            mode = LineDataSet.Mode.CUBIC_BEZIER
+        }
+
+        waveformChart.data = LineData(dataSet)
+        waveformChart.invalidate()
     }
 }
